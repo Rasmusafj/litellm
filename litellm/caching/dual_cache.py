@@ -307,15 +307,33 @@ class DualCache(BaseCache):
             f"async set cache: cache key: {key}; local_only: {local_only}; value: {value}"
         )
         try:
+            result = None
+
+            # Always update in-memory cache (doesn't support nx)
             if self.in_memory_cache is not None:
                 await self.in_memory_cache.async_set_cache(key, value, **kwargs)
 
+            # Update Redis cache and capture result
             if self.redis_cache is not None and local_only is False:
-                await self.redis_cache.async_set_cache(key, value, **kwargs)
+                result = await self.redis_cache.async_set_cache(key, value, **kwargs)
+
+            # Return behavior based on nx parameter:
+            # - If nx=True: return Redis result (True/False/None)
+            # - If nx=False or not set: return True (operation succeeded)
+            nx = kwargs.get("nx", False)
+            if nx:
+                # For nx operations, return the Redis result
+                # None means Redis wasn't available, False means key existed, True means set succeeded
+                return result
+            else:
+                # For normal set operations, return True (we successfully set it)
+                return True
+
         except Exception as e:
             verbose_logger.exception(
                 f"LiteLLM Cache: Excepton async add_cache: {str(e)}"
             )
+            return False  # Return False on error
 
     # async_batch_set_cache
     async def async_set_cache_pipeline(

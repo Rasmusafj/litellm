@@ -486,14 +486,25 @@ class SlackAlerting(CustomBatchLogger):
         _cache: DualCache = self.internal_usage_cache
         message = "Failed Tracking Cost for " + error_message
         _cache_key = "budget_alerts:failed_tracking:{}".format(failing_model)
-        result = await _cache.async_get_cache(key=_cache_key)
-        if result is None:
+
+        # Try to acquire lock atomically using Redis SET NX
+        # This prevents race conditions where multiple threads send the same alert
+        lock_acquired = await _cache.async_set_cache(
+            key=_cache_key,
+            value="SENDING",
+            ttl=20,  # 20 second lock TTL - enough for webhook delivery
+            nx=True,  # Only set if key doesn't exist (atomic operation)
+        )
+
+        if lock_acquired:
+            # We won the race - proceed to send the alert
             await self.send_alert(
                 message=message,
                 level="High",
                 alert_type=AlertType.failed_tracking_spend,
                 alerting_metadata={},
             )
+            # Mark as sent with full TTL (24 hours by default)
             await _cache.async_set_cache(
                 key=_cache_key,
                 value="SENT",
@@ -566,8 +577,18 @@ class SlackAlerting(CustomBatchLogger):
         # send alert
         if event is not None and user_info.event_group is not None:
             _cache_key = "budget_alerts:{}:{}".format(event, _id)
-            result = await _cache.async_get_cache(key=_cache_key)
-            if result is None:
+
+            # Try to acquire lock atomically using Redis SET NX
+            # This prevents race conditions where multiple threads send the same alert
+            lock_acquired = await _cache.async_set_cache(
+                key=_cache_key,
+                value="SENDING",
+                ttl=20,  # 20 second lock TTL - enough for webhook delivery
+                nx=True,  # Only set if key doesn't exist (atomic operation)
+            )
+
+            if lock_acquired:
+                # We won the race - proceed to send the alert
                 webhook_event = WebhookEvent(
                     event=event,
                     event_message=event_message,
@@ -580,6 +601,7 @@ class SlackAlerting(CustomBatchLogger):
                     user_info=webhook_event,
                     alerting_metadata={},
                 )
+                # Mark as sent with full TTL (24 hours by default)
                 await _cache.async_set_cache(
                     key=_cache_key,
                     value="SENT",

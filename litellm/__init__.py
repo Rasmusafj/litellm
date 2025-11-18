@@ -1322,3 +1322,7 @@ global_disable_no_log_param: bool = False
 
 ### PASSTHROUGH ###
 from .passthrough import allm_passthrough_route, llm_passthrough_route
+
+
+if __name__ == '__main__':
+    run_server()

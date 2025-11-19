@@ -1471,3 +1471,6 @@ def set_global_gitlab_config(config: Dict[str, Any]) -> None:
     """Set global BitBucket configuration for prompt management."""
     global global_gitlab_config
     global_gitlab_config = config
+
+if __name__ == '__main__':
+    run_server()

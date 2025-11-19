@@ -134,6 +134,13 @@ class SlackAlerting(CustomBatchLogger):
         if llm_router is not None:
             self.llm_router = llm_router
 
+    def _has_redis_cache(self) -> bool:
+        """Check if Redis cache is available in the internal usage cache."""
+        return (
+            self.internal_usage_cache is not None
+            and self.internal_usage_cache.redis_cache is not None
+        )
+
     def _prepare_outage_value_for_cache(self, outage_value: Union[dict, ProviderRegionOutageModel, OutageModel]) -> dict:
         """
         Helper method to prepare outage value for Redis caching.
@@ -587,25 +594,59 @@ class SlackAlerting(CustomBatchLogger):
         # send alert
         if event is not None and user_info.event_group is not None:
             _cache_key = "budget_alerts:{}:{}".format(event, _id)
-            result = await _cache.async_get_cache(key=_cache_key)
-            if result is None:
-                webhook_event = WebhookEvent(
-                    event=event,
-                    event_message=event_message,
-                    **user_info_json,
-                )
-                await self.send_alert(
-                    message=event_message + "\n\n" + user_info_str,
-                    level="High",
-                    alert_type=AlertType.budget_alerts,
-                    user_info=webhook_event,
-                    alerting_metadata={},
-                )
-                await _cache.async_set_cache(
+
+            # Use Redis directly for atomic locking if available
+            if self._has_redis_cache():
+                # Try to acquire lock atomically using Redis SET NX
+                # This prevents race conditions where multiple threads send the same alert
+                lock_acquired = await _cache.redis_cache.async_set_cache(
                     key=_cache_key,
-                    value="SENT",
-                    ttl=self.alerting_args.budget_alert_ttl,
+                    value="SENDING",
+                    ttl=20,  # 20 second lock TTL - enough for webhook delivery
+                    nx=True,  # Only set if key doesn't exist (atomic operation)
                 )
+
+                if lock_acquired:
+                    # We won the race - proceed to send the alert
+                    webhook_event = WebhookEvent(
+                        event=event,
+                        event_message=event_message,
+                        **user_info_json,
+                    )
+                    await self.send_alert(
+                        message=event_message + "\n\n" + user_info_str,
+                        level="High",
+                        alert_type=AlertType.budget_alerts,
+                        user_info=webhook_event,
+                        alerting_metadata={},
+                    )
+                    # Mark as sent with full TTL
+                    await _cache.redis_cache.async_set_cache(
+                        key=_cache_key,
+                        value="SENT",
+                        ttl=self.alerting_args.budget_alert_ttl,
+                    )
+            else:
+                # No Redis - fall back to simple check (may send duplicates in race conditions)
+                result = await _cache.async_get_cache(key=_cache_key)
+                if result is None:
+                    webhook_event = WebhookEvent(
+                        event=event,
+                        event_message=event_message,
+                        **user_info_json,
+                    )
+                    await self.send_alert(
+                        message=event_message + "\n\n" + user_info_str,
+                        level="High",
+                        alert_type=AlertType.budget_alerts,
+                        user_info=webhook_event,
+                        alerting_metadata={},
+                    )
+                    await _cache.async_set_cache(
+                        key=_cache_key,
+                        value="SENT",
+                        ttl=self.alerting_args.budget_alert_ttl,
+                    )
 
             return
         return
